@@ -15,12 +15,12 @@ WHAT THIS GIVES YOU
    - sp_ml(p):  Mass–length version of discrete sharpness (analytically equivalent to sp)
 
 2) Continuous sharpness on a bounded interval [a, b]:
-   - sd(pdf, a, b, bins):        Simplified continuous sharpness S(d_*)
+   - sd(pdf, a, b, bins):        Simplified continuous sharpness S(f)
    - sd_ml(pdf, a, b, bins):     Mass–length continuous sharpness (equiv. to sd)
    - sd_gini(pdf, a, b, bins):   Gini-style continuous sharpness (equiv. to sd)
 
 3) Relative sharpness, domain transformations:
-   - s_rel(S1, S2):              Relative sharpness gain (ΔS_REL)
+   - s_rel(S1, S2):              Relative sharpness change (ΔS_REL)
    - sp_f(Sm, m, n, strict=True) / sp_i(Sn, n, m, strict=True):    Discrete-domain scaling (forward/inverse)
    - sd_f(S_ell, ell, L, strict=True) / sd_i(S_L, L, ell, strict=True):    Continuous-domain scaling (forward/inverse)
 
@@ -51,7 +51,7 @@ def sp(p):
     """
     Discrete sharpness S(P): simplified (fast) form — works for 1D or multidimensional PMFs.
 
-    Definition (paper, Eq. 2.4):
+    Definition (paper, Eq. 2.3):
         Let p_(j) be the probabilities sorted in ascending order, j = 1..n.
         Then
             S(P) = sum_{j=1}^n [ (2j - n - 1) / (n - 1) ] * p_(j)
@@ -88,7 +88,7 @@ def sp_ml(p):
     """
     Discrete sharpness S(P): mass–length (expanded) form — works for 1D or multidimensional PMFs.
 
-    Construction (paper, Eq. 2.3):
+    Construction (paper, Eq. 2.2):
         - Let p_(j) be the probabilities sorted in ascending order, j = 1..n.
         - At each step j, define:
               m_(j) = sum_{k=j}^n p_(k)        (remaining mass)
@@ -125,18 +125,18 @@ def sp_ml(p):
 def sd(pdf, a, b, bins=10_000):
 
     """
-    Continuous sharpness S(d_*): simplified (fast) form.
+    Continuous sharpness S(f): simplified (fast) form.
 
-    Definition (paper, Eq. 2.6):
-        S(d_*) = (2 / L) * ∫_0^L t * d_*(t) dt - 1,
+    Definition (paper, Eq. 2.7):
+        S(f) = (2 / L) * ∫_0^L t * f^uparrow (t) dt - 1,
         where:
             - L = b - a
-            - d_*(t) is the non-decreasing rearrangement of the density values.
+            - f^uparrow(t) is the non-decreasing rearrangement of the density values.
 
     Numerical scheme:
         - Discretize [a, b] with 'bins'.
-        - Evaluate pdf at midpoints and sort ascending to approximate d_*(t).
-        - Approximate ∫ t d_*(t) dt by midpoint Riemann sum.
+        - Evaluate pdf at midpoints and sort ascending to approximate f^uparrow(t).
+        - Approximate ∫ t f^uparrow(t) dt by midpoint Riemann sum.
 
     Intuition:
         - Computes the mean position of mass in rearranged space: more mass
@@ -164,19 +164,19 @@ def sd(pdf, a, b, bins=10_000):
 def sd_ml(pdf, a, b, bins=10_000):
 
     """
-    Continuous sharpness S(d_*): mass–length (expanded) form.
+    Continuous sharpness S(f): mass–length (expanded) form.
 
-    Construction (paper, Eq. 2.5):
+    Construction (paper, Eq. 2.6):
         Define in rearranged space:
-          m(t) = ∫_t^L d_*(s) ds          (remaining mass)
-          L(t) = L - t                    (remaining length)
+          m(t) = ∫_t^L f^uparrow(s) ds          (remaining mass)
+          L(t) = L - t                          (remaining length)
         Then
-          S(d_*) = (1 / L) ∫_0^L [ m(t) - d_*(t) * L(t) ] dt
+          S(f) = (1 / L) ∫_0^L [ m(t) - f^uparrow(t) * L(t) ] dt
 
     Numerical scheme:
-        - Discretize [a, b] at midpoints x_i; evaluate and sort pdf(x_i) to get d_*(t_i).
+        - Discretize [a, b] at midpoints x_i; evaluate and sort pdf(x_i) to get f^uparrow(t_i).
         - Approximate m(t_i) via reverse cumulative sums times bin width.
-        - Compute d_*(t_i)*(L - t_i)] for each bin.
+        - Compute f^uparrow(t_i)*(L - t_i)] for each bin.
 
     Intuition:
         - Accumulates the local deficits from uniformity across the rearranged domain.
@@ -204,15 +204,15 @@ def sd_ml(pdf, a, b, bins=10_000):
 def sd_gini(pdf, a, b, bins=10_000):
 
     """
-    Continuous sharpness S(d_*): Gini-style form.
+    Continuous sharpness S(f): Gini-style form.
 
     Construction (paper, Eq. 4.2):
-        S(d_*) = 1 - 2 ∫_0^1 L(u) du,
-        where L(u) is a Lorenz-type curve built from the cumulative mass of d_*(t).
+        S(f) = 1 - 2 ∫_0^1 L(u) du,
+        where L(u) is a Lorenz-type curve built from the cumulative mass of f^uparrow(t).
 
     Numerical scheme:
-        - Build d_*(t) by sorting pdf values on midpoints.
-        - cum_mass[i] = ∑_{k ≤ i} d_*(t_k) * w, from 0 to 1.
+        - Build f^uparrow(t) by sorting pdf values on midpoints.
+        - cum_mass[i] = ∑_{k ≤ i} f^uparrow(t_k) * w, from 0 to 1.
         - Approximate ∫_0^1 L(u) du by trapezoidal sum over u = t / L.
 
     Intuition:
@@ -238,33 +238,33 @@ def sd_gini(pdf, a, b, bins=10_000):
     return 1.0 - 2.0 * lorenz
 
 def s_rel(S1, S2, strict=True):
-
     """
-    Compute the relative sharpness gain from S1 to S2.
+    Compute the relative sharpness change from S1 to S2.
 
     Formula:
         ΔS_REL = (S2 - S1) / (1 - S1)
 
-    Assumptions / requirements:
-        S1 and S2 are the sharpness scores of distributions evaluated over the same domain.
-
     Parameters:
         S1 (float): Baseline sharpness score (0 ≤ S1 < 1)
-        S2 (float): New sharpness score (S2 > S1, S2 ≤ 1)
+        S2 (float): New sharpness score (0 ≤ S2 ≤ 1)
         strict (bool): If True, enforces valid range checks
 
     Returns:
-                   float in [0, 1].
+                   float in [-9999..., 1].
 
          Raises:
                    ValueError if inputs violate the valid ranges (when strict=True).
          """
 
     S1, S2 = float(S1), float(S2)
-    if strict and not (0 <= S1 < 1 and S1 < S2 <= 1):
-        raise ValueError("Require 0 ≤ S1 < S2 ≤ 1")
-    return (S2 - S1) / (1 - S1)
 
+    if strict and not (0 <= S1 < 1 and 0 <= S2 <= 1):
+        raise ValueError("Require 0 ≤ S1 < 1 and 0 ≤ S2 ≤ 1")
+
+    if S1 == 1:
+        raise ValueError("Relative change undefined when S1 = 1")
+
+    return (S2 - S1) / (1 - S1)
 
 def sp_f(Sm, m, n, strict=True):
 
@@ -458,7 +458,7 @@ S_val = S_gauss
 S_forward = sd_f(S_val, ell, L)
 S_inverse = sd_i(S_forward, L, ell)
 print(f"\nDomain transformation for Gaussian μ=2.8, σ=1")
-print(f"  S(d*) = {S_val:.4f}")
+print(f"  S(f) = {S_val:.4f}")
 print(f"  sd_f (ell={ell} → L={L}): {S_forward:.4f}")
 print(f"  sd_i (L={L} → ell={ell}): {S_inverse:.4f}")
 
