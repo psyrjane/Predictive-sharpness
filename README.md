@@ -8,4 +8,5 @@ Article: https://doi.org/10.48550/arXiv.2509.03309
 Guide:
 
 sharpness_multi.py - Contains the main sharpness function S(f) for continuous multidimensional pdfs, with midpoint discretization, domain preparation, and sharpness visualizations.
+
 sharpness_core.py - Contains the discrete sharpness function S(P), S_rel, domain transformations, and a basic version of the continuous sharpness function S(f).
