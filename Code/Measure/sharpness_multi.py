@@ -2,9 +2,8 @@
 Predictive Sharpness for Multidimensional Cases — Midpoint Discretization + Visualizations
 --------------------------------------------------------------------------
 
-This script implements the sharpness measure S(d*) from the paper:
-"A Measure of Predictive Sharpness for Probabilistic Models" with support for multidimensional use, midpoint discretization, direct array inputs,
-and visualizations, using the three equivalent sharpness formulas:
+This script implements the continuous sharpness measure S(f) from the paper:
+"A Measure of Predictive Sharpness for Probabilistic Models" with support for multidimensional use, midpoint discretization, direct array inputs, and visualizations, using the three equivalent sharpness formulas:
 
     1) Simplified
     2) Mass–Length (ML)
@@ -27,10 +26,11 @@ WHAT THIS GIVES YOU
      → Returns S(d*) in [0, 1]
 
 4) Visualizations of the three formulations:
-   - visualize_sharpness(pdfs, titles, mode="simplified" | "ml" | "gini")
+   - visualize_sharpness(pdfs, titles, mode="simplified" | "ml" | "gini" | "cplot")
      → Simplified: plots t·d*(t)
      → ML: plots m(t) and d*(t)·L(t) separately
      → Gini: plots Lorenz-style cumulative mass curves
+     → Cplot: concentration plot version of the ml-plot (inverse vase-view of ml)
 
 INTERPRETATION
 --------------
@@ -65,7 +65,7 @@ PRACTICAL TIPS
   is a good balance for most cases.
 - Use "simplified" mode for fastest computation; "ml" and "gini" are
   mathematically equivalent but yield additional interpretable curves.
-- For dimensions >4, use sampling methods to evaluate the pdf (e.g., Monte Carlo)
+- For dimensions >4, use sampling methods to evaluate the pdf instead (e.g., Monte Carlo)
 
 TYPICAL WORKFLOWS
 -----------------
@@ -442,7 +442,7 @@ def sharpness_multi(dvals, mode="simplified", plot_data=False):
         raise ValueError("mode must be 'simplified', 'ml', or 'gini'")
 
 # === 3. Visualization function ===
-def visualize_sharpness(pdfs, titles=None, mode="gini"):
+def visualize_sharpness(pdfs, titles=None, mode="gini", show_fractional=True, mass_bins=4, zoom_y=0.0):
     """
     Visualize sharpness for select PDFs.
 
@@ -455,7 +455,19 @@ def visualize_sharpness(pdfs, titles=None, mode="gini"):
         "PDF 1", "PDF 2", etc. If fewer titles are provided than PDFs,
         remaining PDFs will be labeled automatically.
     mode : str
-        Sharpness mode to visualize: 'simplified', 'ml', or 'gini'.
+        Sharpness mode to visualize: 'simplified', 'ml', 'gini', or 'cplot'.
+    show_fractional : bool, default=True
+        Used only for mode='cplot'. If True, show the y-axis as fractions
+        of the rearranged domain (0 to 1). If False, show the full rearranged
+        domain scale (0 to |Omega|).
+    mass_bins : int, default=4
+        Used only for mode='cplot'. Number of mass-bins show.
+        Must be an integer between 1-10.
+    zoom_y : float, default=0.0
+        Used only for mode='cplot'. Fraction of the rearranged domain from which
+        to begin visualization. If 0.0, no zoom is applied. If nonzero, must be
+        between 0.000001 and 0.999999. The visible portion is stretched to the 
+        full plot height.
     """
 
     if not isinstance(pdfs, (list, tuple)):
@@ -512,8 +524,260 @@ def visualize_sharpness(pdfs, titles=None, mode="gini"):
         plt.tight_layout()
         plt.show()
 
+    elif mode == "cplot":
+        if not isinstance(mass_bins, int) or not (1 <= mass_bins <= 10):
+            raise ValueError("mass_bins must be an integer between 1 and 10.")
+
+        if zoom_y != 0.0:
+            if not (0.000001 <= zoom_y <= 0.999999):
+                raise ValueError(
+                    "zoom must be 0.0 (no zoom) or between 0.000001 and 0.999999."
+                )
+
+        def _concentration_plot_data(dvals):
+            dvals = np.asarray(dvals, float).ravel()
+            N = dvals.size
+            L = 1.0 / dvals.mean()
+            v = L / N
+
+            score, t_left, m, dL = sharpness_multi(dvals, mode="ml", plot_data=True)
+
+            # Recover sorted densities q from reverse cumulative mass m
+            q = np.empty_like(m)
+            if N > 1:
+                q[:-1] = (m[:-1] - m[1:]) / v
+            q[-1] = m[-1] / v
+
+            t_mid = t_left + 0.5 * v
+            delta = m - dL
+            width = 1.0 - delta
+
+            # Equal-mass bin edges in ranked space
+            cum_mass = np.cumsum(q) * v
+            mass_edges = np.linspace(0.0, 1.0, mass_bins + 1)
+
+            # Interpolate on right-edge positions: 0, v, 2v, ..., L
+            t_edges = np.interp(
+                mass_edges,
+                np.concatenate(([0.0], cum_mass)),
+                np.linspace(0.0, L, N + 1)
+            )
+
+            # Downsample for plotting only
+            n_plot = min(4500, N)  ### INCREASE FOR LARGE (HIGH-D) DOMAINS WITH VERY SMALL SUPPORT
+            idx = np.linspace(0, N - 1, n_plot).astype(int)
+
+            return {
+                "t": t_mid[idx],
+                "width": width[idx],
+                "t_edges": t_edges,
+                "sharpness": float(score),
+                "L": float(L),
+            }
+
+        data_list = [_concentration_plot_data(pdf) for pdf in pdfs]
+
+        ncols = min(3, n)
+        nrows = int(np.ceil(n / 3))
+        fig, axes = plt.subplots(
+            nrows, ncols,
+            figsize=(3.8 * ncols, 5.8 * nrows),
+            sharey=True,
+            constrained_layout=True
+        )
+
+        if nrows == 1 and ncols == 1:
+            axes = np.array([[axes]])
+        elif nrows == 1:
+            axes = np.array([axes])
+        elif ncols == 1:
+            axes = axes[:, None]
+
+        cmap = plt.get_cmap("tab10", mass_bins)
+
+        for k, (ax, data, title) in enumerate(zip(axes.ravel(), data_list, titles)):
+            t = data["t"]
+            width = data["width"]
+            t_edges = data["t_edges"]
+            L = data["L"]
+
+            # Fractional positions in original (unzoomed) rearranged domain
+            frac = t / L
+            frac_edges = t_edges / L
+
+            local_handles = []
+
+            if zoom_y == 0.0:
+                if show_fractional:
+                    y = frac
+                    y_edges = frac_edges
+                    y_max = 1.0
+                else:
+                    y = t
+                    y_edges = t_edges
+                    y_max = L
+
+                ax.plot(width, y, color="black", lw=1.8)
+                ax.plot(-width, y, color="black", lw=1.8)
+
+                for i in range(mass_bins):
+                    mask = (y >= y_edges[i]) & (y <= y_edges[i + 1])
+
+                    if np.any(mask):
+                        label = (
+                            f"{int(round(100 * i / mass_bins))}–"
+                            f"{int(round(100 * (i + 1) / mass_bins))}% mass"
+                            if k == 0 else None
+                        )
+
+                        h = ax.fill_betweenx(
+                            y[mask], -width[mask], width[mask],
+                            color=cmap(i), alpha=0.72, label=label
+                        )
+
+                        if k == 0:
+                            local_handles.append(h)
+
+                for ye in y_edges[1:-1]:
+                    w_ye = np.interp(ye, y, width)
+                    ax.hlines(
+                        ye,
+                        xmin=-0.99 * w_ye,
+                        xmax=0.99 * w_ye,
+                        color="white",
+                        lw=1.3,
+                        alpha=0.95
+                    )
+
+                ax.set_xlim(-1.05, 1.05)
+                ax.set_ylim(0, y_max)
+
+                ax.set_title(f"{title}\n$S = {data['sharpness']:.3f}$", fontsize=10)
+
+            else:
+                # Keep only visible part
+                visible_mask = frac >= zoom_y
+                if not np.any(visible_mask):
+                    ax.set_visible(False)
+                    continue
+
+                frac_vis = frac[visible_mask]
+                width_vis = width[visible_mask]
+
+                # Stretch visible portion to full plot height
+                y_plot = (frac_vis - zoom_y) / (1.0 - zoom_y)
+
+                ax.plot(width_vis, y_plot, color="black", lw=1.8)
+                ax.plot(-width_vis, y_plot, color="black", lw=1.8)
+
+                # Fill only mass bins still visible after zoom
+                for i in range(mass_bins):
+                    edge_lo = frac_edges[i]
+                    edge_hi = frac_edges[i + 1]
+
+                    # Skip bins entirely below the zoom threshold
+                    if edge_hi <= zoom_y:
+                        continue
+
+                    mask = (
+                        (frac >= max(edge_lo, zoom_y)) &
+                        (frac <= edge_hi)
+                    )
+
+                    if np.any(mask):
+                        y_bin = (frac[mask] - zoom_y) / (1.0 - zoom_y)
+                        w_bin = width[mask]
+
+                        label = (
+                            f"{int(round(100 * i / mass_bins))}–"
+                            f"{int(round(100 * (i + 1) / mass_bins))}% mass"
+                            if k == 0 else None
+                        )
+
+                        h = ax.fill_betweenx(
+                            y_bin, -w_bin, w_bin,
+                            color=cmap(i), alpha=0.72, label=label
+                        )
+
+                        if k == 0:
+                            local_handles.append(h)
+
+                # Draw visible mass-bin boundaries only
+                for fe in frac_edges[1:-1]:
+                    if fe <= zoom_y:
+                        continue
+                    ye_plot = (fe - zoom_y) / (1.0 - zoom_y)
+                    w_fe = np.interp(fe, frac, width)
+                    ax.hlines(
+                        ye_plot,
+                        xmin=-0.99 * w_fe,
+                        xmax=0.99 * w_fe,
+                        color="white",
+                        lw=1.3,
+                        alpha=0.95
+                    )
+
+                ax.set_xlim(-1.05, 1.05)
+                ax.set_ylim(0, 1.0)
+
+                ax.set_title(
+                    f"{title}\n$S = {data['sharpness']:.3f}$, zoom from {zoom_y:.2f}",
+                    fontsize=10
+                )
+
+            ax.spines["top"].set_visible(False)
+            ax.grid(False)
+            ax.set_xlabel(r"$1-\Delta(t)$", fontsize=9)
+
+            ax.set_xticks([-0.5, 0.5])
+            ax.set_xticklabels(["0.5", "0.5"], fontsize=8)
+
+            # y ticks
+            if zoom_y != 0.0:
+                tick_pos = np.linspace(0.0, 1.0, 6)
+                frac_tick_vals = zoom_y + tick_pos * (1.0 - zoom_y)
+
+                if show_fractional:
+                    tick_labels = [f"{v:.3f}" for v in frac_tick_vals]
+                else:
+                    tick_labels = [f"{(v * L):.3f}" for v in frac_tick_vals]
+
+                ax.set_yticks(tick_pos)
+                ax.set_yticklabels(tick_labels, fontsize=8)
+
+            col = k % ncols
+
+            if col == 0:
+                if show_fractional:
+                    ax.set_ylabel("Fractions of rearranged domain (u)")
+                else:
+                    ax.set_ylabel("Rearranged domain (t)")
+                ax.spines["left"].set_visible(True)
+                ax.spines["right"].set_visible(False)
+                ax.yaxis.tick_left()
+                ax.yaxis.set_label_position("left")
+            else:
+                ax.tick_params(axis="y", left=False, labelleft=False, right=False, labelright=False)
+                ax.spines["left"].set_visible(False)
+                ax.spines["right"].set_visible(False)
+
+            if k == 0 and local_handles:
+                ax.legend(
+                    handles=local_handles,
+                    fontsize=8,
+                    loc="best",
+                    frameon=True,
+                    title="Mass bins"
+                )
+
+        # Hide unused axes
+        for ax in axes.ravel()[n:]:
+            ax.set_visible(False)
+
+        plt.show()
+
     else:
-        raise ValueError("mode must be 'simplified', 'ml', or 'gini'")
+        raise ValueError("mode must be 'simplified', 'ml', 'gini', or 'cplot'")
 
 # === 4. EXAMPLE (UNCOMMENT TO RUN) ===
 #if __name__ == "__main__":
@@ -555,3 +819,6 @@ def visualize_sharpness(pdfs, titles=None, mode="gini"):
 #
 #    print("\n--- Gini mode ---")
 #    visualize_sharpness(pdfs, titles, mode="gini")
+#
+#    print("\n--- Concentration plots mode ---")
+#    visualize_sharpness(pdfs, titles, mode="cplot", show_fractional=True, mass_bins=4, zoom_y=0.0)
