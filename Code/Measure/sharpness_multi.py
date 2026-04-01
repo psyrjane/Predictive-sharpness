@@ -3,7 +3,8 @@ Predictive Sharpness for Multidimensional Cases — Midpoint Discretization + Vi
 --------------------------------------------------------------------------
 
 This script implements the continuous sharpness measure S(f) from the paper:
-"A Measure of Predictive Sharpness for Probabilistic Models" with support for multidimensional use, midpoint discretization, direct array inputs, and visualizations, using the three equivalent sharpness formulas:
+"A Measure of Predictive Sharpness for Probabilistic Models" with support for multidimensional use, 
+midpoint discretization, direct array inputs, and visualizations, using the three equivalent sharpness formulas:
 
     1) Simplified
     2) Mass–Length (ML)
@@ -23,12 +24,12 @@ WHAT THIS GIVES YOU
 
 3) Sharpness calculation for discretized PDF values:
    - sharpness_multi(dvals, mode="simplified" | "ml" | "gini")
-     → Returns S(d*) in [0, 1]
+     → Returns S(f) in [0, 1]
 
 4) Visualizations of the three formulations:
    - visualize_sharpness(pdfs, titles, mode="simplified" | "ml" | "gini" | "cplot")
-     → Simplified: plots t·d*(t)
-     → ML: plots m(t) and d*(t)·L(t) separately
+     → Simplified: plots t·f^uparrow(t)
+     → ML: plots m(t) and f^uparrow(t)·L(t) separately
      → Gini: plots Lorenz-style cumulative mass curves
      → Cplot: concentration plot version of the ml-plot (inverse vase-view of ml)
 
