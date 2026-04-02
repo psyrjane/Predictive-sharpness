@@ -1,5 +1,5 @@
 # Predictive-sharpness
-This repository contains the code for implementing the sharpness measure from the paper "A Measure of Predictive Sharpness for Probabilistic Models". It also contains the code for reproducing all the figures, tables, simulations, and experiments in the paper.
+This repository contains the code for implementing the sharpness measure from the paper "A Measure of Predictive Sharpness for Probabilistic Models". It also contains the code for reproducing the figures, tables, simulations, and experiments in the paper.
 
 For implementation, see the folder "Measure". For reproducibility material, see the folder "Reproducibility".
 
