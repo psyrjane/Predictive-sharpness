@@ -75,7 +75,7 @@ grid_style = dict(linewidth=0.7, alpha=0.5)
 
 for name, pdf_vals in zip(titles, pdfs):
     sh = sharpness_multi(pdf_vals, mode="simplified")
-    print(f"{name}: Sharpness S(d_*) = {sh:.6f}")
+    print(f"{name}: Sharpness S(f) = {sh:.6f}")
 
 for i, (pdf, title) in enumerate(zip(pdfs, titles), 1):
     score, t_vals, m, dL = sharpness_multi(pdf, mode="ml", plot_data=True)
@@ -91,7 +91,7 @@ for i, (pdf, title) in enumerate(zip(pdfs, titles), 1):
     # Right: Integrand components
     plt.subplot(4, 2, 2*i)
     plt.plot(t_vals, m, label="m(t)", color="blue", linewidth=2)
-    plt.plot(t_vals, dL, label=r"$d_*(t)\cdot L(t)$", color="red", linewidth=2)
+    plt.plot(t_vals, dL, label=r"$f^{\uparrow}\!\!(t)\cdot L(t)$", color="red", linewidth=2)
     if i == 1:
         plt.title(f"Integral Components (S = {score:.3f})", fontsize=12)
     else:
