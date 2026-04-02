@@ -66,7 +66,7 @@ for i, level in enumerate(sharpness_levels_n4):
     if len(proj) > 0:
         ax.scatter(proj[:, 0], proj[:, 1], proj[:, 2], color=colors[i], s=10, marker='x', alpha=0.6, label=f"Sharpness ≈ {level}")
 
-ax.set_title("Sharpness Sets on the 3-Simplex (n = 4)", fontweight='bold')
+ax.set_title("Sharpness Sets on the 3-Simplex (n = 4)", fontsize=15, fontweight='bold')
 ax.set_xlabel("X")
 ax.set_ylabel("Y")
 ax.set_zlabel("Z")
@@ -82,7 +82,7 @@ for i, level in enumerate(entropy_levels_n4):
     if len(proj) > 0:
         ax.scatter(proj[:, 0], proj[:, 1], proj[:, 2], color=colors[i], s=10, marker='x', alpha=0.6, label=f"Entropy ≈ {level}")
 
-ax.set_title("Entropy Sets on the 3-Simplex (n = 4)", fontweight='bold')
+ax.set_title("Entropy Sets on the 3-Simplex (n = 4)", fontsize=15, fontweight='bold')
 ax.set_xlabel("X")
 ax.set_ylabel("Y")
 ax.set_zlabel("Z")
