@@ -60,7 +60,7 @@ sc = ax.scatter(
     alpha=0.7
 )
 
-ax.set_title("Variance over Sharpness ≈ 0.7", fontsize=12, fontweight='bold')
+ax.set_title("Variance over Sharpness ≈ 0.7", fontsize=15, fontweight='bold')
 ax.set_xlabel("X")
 ax.set_ylabel("Y")
 ax.set_zlabel("Z")
