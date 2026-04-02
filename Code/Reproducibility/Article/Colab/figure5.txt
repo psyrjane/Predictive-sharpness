@@ -1,0 +1,270 @@
+"""CELL 1 - FIGURE 5 (RUN IN GOOGLE COLAB)"""
+
+# Example 1 - precipitation heatmaps:
+# Mean sharpness, CRPS, 90% interval width, and variance maps
+
+%pip install -q "xarray[io]" zarr gcsfs dask matplotlib pandas numpy scipy
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import xarray as xr
+import gcsfs
+
+# ----------------------------
+# Open public WeatherBench 2 data
+# ----------------------------
+fs = gcsfs.GCSFileSystem(token="anon")
+
+FC_PATH = "weatherbench2/datasets/ifs_ens/2018-2022-240x121_equiangular_with_poles_conservative.zarr"
+OBS_PATH = "weatherbench2/datasets/era5/1959-2023_01_10-6h-240x121_equiangular_with_poles_conservative.zarr"
+
+ds_fc = xr.open_zarr(fs.get_mapper(FC_PATH), consolidated=None)
+ds_obs = xr.open_zarr(fs.get_mapper(OBS_PATH), consolidated=None)
+
+print("Opened forecast dataset:")
+print(ds_fc)
+print("\nOpened observation dataset:")
+print(ds_obs)
+
+# ----------------------------
+# Example 1 configuration: precipitation heatmaps
+# ----------------------------
+PRECIP_START = "2021-01-01"
+PRECIP_END = "2021-01-08"
+PRECIP_LEAD_HOURS = 72
+PRECIP_MAX_INIT_TIMES = 16
+PRECIP_DOMAIN_MAX_MM = 100.0
+PRECIP_N_BINS = 50
+
+# ----------------------------
+# Helper functions
+# ----------------------------
+
+def select_forecasts_and_obs(
+    forecast_ds,
+    obs_ds,
+    variable,
+    start_date,
+    end_date,
+    lead_hours,
+    max_init_times,
+):
+    if variable not in forecast_ds:
+        raise KeyError(f"{variable!r} not found in forecast dataset")
+    if variable not in obs_ds:
+        raise KeyError(f"{variable!r} not found in observation dataset")
+
+    lead = np.timedelta64(int(lead_hours), "h")
+    forecast = forecast_ds[variable].sel(time=slice(start_date, end_date))
+
+    if "realization" in forecast.dims:
+        forecast = forecast.rename({"realization": "number"})
+
+    if "prediction_timedelta" not in forecast.coords:
+        raise KeyError("forecast dataset does not have 'prediction_timedelta'")
+
+    available_leads = forecast["prediction_timedelta"].values
+    if lead not in available_leads:
+        available_hours = [int(v / np.timedelta64(1, "h")) for v in available_leads]
+        raise ValueError(
+            f"Lead {lead_hours}h not found. Available lead hours start like: {available_hours[:12]} ..."
+        )
+
+    forecast = forecast.sel(prediction_timedelta=lead)
+
+    if max_init_times > 0 and forecast.sizes["time"] > max_init_times:
+        forecast = forecast.isel(time=slice(0, max_init_times))
+
+    valid_times = forecast["time"].values + lead
+    obs = obs_ds[variable].reindex(time=xr.DataArray(valid_times, dims="time"))
+    obs = obs.assign_coords(time=forecast["time"].values)
+
+    forecast = forecast.transpose("time", "number", "latitude", "longitude")
+    obs = obs.transpose("time", "latitude", "longitude")
+    return forecast, obs
+
+def to_mm(data):
+    return xr.where(data < 0, 0, data) * 1000.0
+
+def histogram_density(values, bin_edges):
+    clipped = np.clip(np.asarray(values, dtype=float), bin_edges[0], bin_edges[-1])
+    hist, _ = np.histogram(clipped, bins=bin_edges, density=True)
+    hist = hist.astype(float)
+    bin_width = float(bin_edges[1] - bin_edges[0])
+    total = hist.sum() * bin_width
+    if total <= 0:
+        raise ValueError("Histogram density has zero mass")
+    hist /= total
+    return hist
+
+def sharpness_multi(dvals, mode="simplified"):
+    dvals = np.asarray(dvals, float).ravel()
+    N = dvals.size
+    if N == 0:
+        raise ValueError("dvals must contain at least one element")
+    mean_density = dvals.mean()
+    if mean_density <= 0:
+        raise ValueError("Mean density must be positive")
+
+    L = 1.0 / mean_density
+    v = L / N
+    d_sorted = np.sort(dvals)
+
+    if mode == "simplified":
+        weights = np.arange(N, dtype=float) + 0.5
+        t = weights * v
+        integral = v * np.dot(d_sorted, t)
+        score = (2.0 / L) * integral - 1.0
+        return float(score)
+
+    raise ValueError("Only mode='simplified' is used here")
+
+def crps_ensemble_scalar(ensemble, obs):
+    """
+    Vectorized scalar ensemble CRPS:
+      CRPS(F, y) = mean |X - y| - 0.5 mean |X - X'|
+    ensemble: shape (n_samples, n_members)
+    obs: shape (n_samples,)
+    """
+    x = np.asarray(ensemble, float)
+    y = np.asarray(obs, float)
+    m = x.shape[1]
+    term1 = np.mean(np.abs(x - y[:, None]), axis=1)
+    x_sorted = np.sort(x, axis=1)
+    coeff = (2 * np.arange(1, m + 1) - m - 1).astype(float)
+    term2 = np.sum(x_sorted * coeff[None, :], axis=1) / (m * m)
+    return term1 - term2
+
+def diff_entropy(dvals, cell_volume):
+    dvals = np.asarray(dvals, float).ravel()
+    dvals = dvals[np.isfinite(dvals)]
+    dvals = dvals[dvals > 0.0]
+
+    cell_volume = float(cell_volume)
+    if cell_volume <= 0:
+        raise ValueError("cell_volume must be positive")
+    if dvals.size == 0:
+        raise ValueError("Histogram density has no positive finite values")
+
+    return float(-np.sum(dvals * np.log2(dvals)) * cell_volume)
+
+print("Helper functions ready.")
+
+# ----------------------------
+# Example 1: precipitation heatmaps
+# ----------------------------
+
+PRECIP_VAR = "total_precipitation_24hr"
+print("Using precipitation variable:", PRECIP_VAR)
+
+forecast, obs = select_forecasts_and_obs(
+    forecast_ds=ds_fc,
+    obs_ds=ds_obs,
+    variable=PRECIP_VAR,
+    start_date=PRECIP_START,
+    end_date=PRECIP_END,
+    lead_hours=PRECIP_LEAD_HOURS,
+    max_init_times=PRECIP_MAX_INIT_TIMES,
+)
+
+forecast_mm = to_mm(forecast)
+obs_mm = to_mm(obs)
+
+ens_mm = forecast_mm.values  # (time, member, lat, lon)
+obs_mm_vals = obs_mm.values  # (time, lat, lon)
+
+time_n, member_n, lat_n, lon_n = ens_mm.shape
+n_samples = time_n * lat_n * lon_n
+
+# Flatten
+ens_flat = np.transpose(ens_mm, (0, 2, 3, 1)).reshape(n_samples, member_n)
+obs_flat = obs_mm_vals.reshape(n_samples)
+
+finite_mask = np.all(np.isfinite(ens_flat), axis=1) & np.isfinite(obs_flat)
+ens_valid = ens_flat[finite_mask]
+obs_valid = obs_flat[finite_mask]
+
+# Vectorized metrics
+variance = np.full(n_samples, np.nan, dtype=float)
+width90 = np.full(n_samples, np.nan, dtype=float)
+crps = np.full(n_samples, np.nan, dtype=float)
+sharpness = np.full(n_samples, np.nan, dtype=float)
+entropy_bits = np.full(n_samples, np.nan, dtype=float)
+
+variance_valid = np.var(ens_valid, axis=1, ddof=0)
+width90_valid = np.quantile(ens_valid, 0.95, axis=1) - np.quantile(ens_valid, 0.05, axis=1)
+crps_valid = crps_ensemble_scalar(ens_valid, obs_valid)
+
+bin_edges = np.linspace(0.0, PRECIP_DOMAIN_MAX_MM, PRECIP_N_BINS + 1)
+dx = float(np.diff(bin_edges)[0])
+
+valid_indices = np.flatnonzero(finite_mask)
+for k, row in enumerate(ens_valid):
+    dvals = histogram_density(row, bin_edges)
+    sharpness[valid_indices[k]] = sharpness_multi(dvals, mode="simplified")
+    entropy_bits[valid_indices[k]] = diff_entropy(dvals, dx)
+
+variance[finite_mask] = variance_valid
+width90[finite_mask] = width90_valid
+crps[finite_mask] = crps_valid
+
+# Reshape back to (time, lat, lon)
+variance_txy = variance.reshape(time_n, lat_n, lon_n)
+width90_txy = width90.reshape(time_n, lat_n, lon_n)
+crps_txy = crps.reshape(time_n, lat_n, lon_n)
+sharpness_txy = sharpness.reshape(time_n, lat_n, lon_n)
+entropy_txy = entropy_bits.reshape(time_n, lat_n, lon_n)
+
+# Mean over time
+mean_variance = np.nanmean(variance_txy, axis=0)
+mean_std = np.sqrt(mean_variance)
+mean_width90 = np.nanmean(width90_txy, axis=0)
+mean_crps = np.nanmean(crps_txy, axis=0)
+mean_sharpness = np.nanmean(sharpness_txy, axis=0)
+mean_entropy = np.nanmean(entropy_txy, axis=0)
+
+lats = forecast_mm["latitude"].values
+lons = forecast_mm["longitude"].values
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 8), constrained_layout=True)
+
+items = [
+    (mean_sharpness, "Mean sharpness", "viridis"),
+    (mean_crps, "Mean CRPS (mm)", "cividis"),
+    (mean_width90, "Mean 90% interval width (mm)", "plasma"),
+    (mean_std, "Mean standard deviation (mm)", "magma"),
+]
+
+for ax, (data, title, cmap) in zip(axes.ravel(), items):
+    mesh = ax.pcolormesh(
+        lons, lats, data,
+        shading="auto",
+        cmap=cmap,
+        edgecolors="none",
+        linewidth=0,
+        antialiased=False,
+        rasterized=True,
+    )
+    ax.set_title(title)
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    plt.colorbar(mesh, ax=ax, shrink=0.85)
+
+fig.suptitle(
+    f"Example 1 — 24-hour precipitation, lead={PRECIP_LEAD_HOURS} h, "
+    f"{PRECIP_START} to {PRECIP_END}, {time_n} init times",
+    y=1.03,
+)
+fig.savefig("precip_heatmaps.pdf", bbox_inches="tight")
+plt.show()
+
+
+
+
+# Download pdf
+from google.colab import files
+files.download("precip_heatmaps.pdf")
