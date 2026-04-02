@@ -1,0 +1,800 @@
+"""CELL 2 - FIGURE 6 (RUN IN GOOGLE COLAB)"""
+
+# Example 2 - WeatherBench2 10m wind-vector test:
+#   - member-centered Gaussian-mixture / kernel-dressed density forecast
+#   - location-specific bandwidth learned on a rolling training period
+#   - outer rolling-origin validation to choose the training-window length
+#   - one fixed pooled square (u,v) box
+#
+# Measures:
+#   - sharpness
+#   - entropy
+#   - determinant sharpness
+#   - energy score
+#
+# Method:
+#   1) For each location, consider candidate training-window lengths.
+#   2) For each candidate window W, do outer rolling one-step-ahead validation:
+#        - at case t, use only previous W cases at that location as training data
+#        - choose bandwidth alpha from ALPHA_GRID by minimizing mean training NLL
+#        - score the current case by NLL
+#      Aggregate mean outer NLL across cases.
+#   3) Pick the best W per location.
+#   4) Refit/evaluate the rolling-trained mixture on all eligible cases using that W.
+
+import sys, subprocess, pkgutil
+
+required = [
+    "xarray", "zarr", "gcsfs", "dask", "matplotlib",
+    "pandas", "numpy", "scipy"
+]
+missing = [p for p in required if pkgutil.find_loader(p) is None]
+if missing:
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "-q",
+         "xarray[io]", "zarr", "gcsfs", "dask", "matplotlib",
+         "pandas", "numpy", "scipy"]
+    )
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import xarray as xr
+import gcsfs
+
+from scipy.special import logsumexp
+from IPython.display import display
+
+# ============================================================
+# Configuration
+# ============================================================
+
+FC_PATH = "weatherbench2/datasets/ifs_ens/2018-2022-240x121_equiangular_with_poles_conservative.zarr"
+OBS_PATH = "weatherbench2/datasets/era5/1959-2023_01_10-6h-240x121_equiangular_with_poles_conservative.zarr"
+
+# Setup
+WIND_START = "2021-01-01"
+WIND_END = "2021-02-28"    # note: period end not reached with 84 init_times setting
+WIND_LEAD_HOURS = 24       # For figure 7, change to 120
+WIND_MAX_INIT_TIMES = 84   # number of forecast issues included
+
+# Density-grid resolution
+WIND_N_BINS_UV = 45
+
+# Box settings
+EVEN_STEP = 2.0
+BOX_PAD_FRAC = 0.04
+
+# Rolling training / outer validation settings
+TRAIN_WINDOW_CANDIDATES = [8, 12, 16, 24]
+TRAIN_MIN_CASES = 8
+ALPHA_GRID = np.array([0.20, 0.30, 0.45, 0.65, 0.90, 1.20, 1.60, 2.10, 2.80])
+
+# Energy score Monte Carlo
+ENERGY_MC_SAMPLES = 3000
+RNG_SEED = 42
+
+# Locations
+WIND_LOCATIONS = [
+    ("Gulf of Alaska", 55.0, -150.0),
+    ("NE Pacific", 45.0, -140.0),
+    ("North Atlantic", 45.0, -30.0),
+    ("Norwegian Sea", 65.0, 0.0),
+]
+
+# ============================================================
+# Helpers
+# ============================================================
+
+def select_forecasts_and_obs(
+    forecast_ds,
+    obs_ds,
+    variable,
+    start_date,
+    end_date,
+    lead_hours,
+    max_init_times,
+):
+    if variable not in forecast_ds:
+        raise KeyError(f"{variable!r} not found in forecast dataset")
+    if variable not in obs_ds:
+        raise KeyError(f"{variable!r} not found in observation dataset")
+
+    lead = np.timedelta64(int(lead_hours), "h")
+    forecast = forecast_ds[variable].sel(time=slice(start_date, end_date))
+
+    if "realization" in forecast.dims:
+        forecast = forecast.rename({"realization": "number"})
+
+    if "prediction_timedelta" not in forecast.coords:
+        raise KeyError("forecast dataset does not have 'prediction_timedelta'")
+
+    available_leads = forecast["prediction_timedelta"].values
+    if lead not in available_leads:
+        available_hours = [int(v / np.timedelta64(1, "h")) for v in available_leads]
+        raise ValueError(
+            f"Lead {lead_hours}h not found. Available lead hours start like: {available_hours[:12]} ..."
+        )
+
+    forecast = forecast.sel(prediction_timedelta=lead)
+
+    if max_init_times > 0 and forecast.sizes["time"] > max_init_times:
+        forecast = forecast.isel(time=slice(0, max_init_times))
+
+    valid_times = forecast["time"].values + lead
+    obs = obs_ds[variable].reindex(time=xr.DataArray(valid_times, dims="time"))
+    obs = obs.assign_coords(time=forecast["time"].values)
+
+    forecast = forecast.transpose("time", "number", "latitude", "longitude")
+    obs = obs.transpose("time", "latitude", "longitude")
+    return forecast, obs
+
+def nearest_gridpoint_indices(da, lat, lon):
+    lats = da["latitude"].values
+    lons = da["longitude"].values
+
+    lon_target = float(lon)
+    if np.nanmax(lons) > 180:
+        lon_target = lon_target % 360.0
+    else:
+        if lon_target > 180:
+            lon_target = ((lon_target + 180.0) % 360.0) - 180.0
+
+    i = int(np.argmin(np.abs(lats - lat)))
+    j = int(np.argmin(np.abs(lons - lon_target)))
+    return i, j, float(lats[i]), float(lons[j])
+
+def stabilize_cov(cov, min_eig=1e-6):
+    cov = np.asarray(cov, float)
+    cov = 0.5 * (cov + cov.T)
+    vals, vecs = np.linalg.eigh(cov)
+    vals = np.maximum(vals, min_eig)
+    return vecs @ np.diag(vals) @ vecs.T
+
+def determinant_sharpness(cov):
+    cov = stabilize_cov(cov)
+    d = cov.shape[0]
+    det = max(float(np.linalg.det(cov)), 1e-18)
+    return float(det ** (1.0 / (2.0 * d)))
+
+def sharpness_multi(dvals):
+    dvals = np.asarray(dvals, float).ravel()
+    N = dvals.size
+    if N == 0:
+        raise ValueError("dvals must contain at least one element")
+
+    mean_density = dvals.mean()
+    if mean_density <= 0:
+        raise ValueError("Mean density must be positive")
+
+    L = 1.0 / mean_density
+    v = L / N
+    d_sorted = np.sort(dvals)
+    weights = np.arange(N, dtype=float) + 0.5
+    t = weights * v
+    integral = v * np.dot(d_sorted, t)
+    score = (2.0 / L) * integral - 1.0
+    return float(score)
+
+def diff_entropy(dvals, cell_volume):
+    dvals = np.asarray(dvals, float).ravel()
+    dvals = dvals[np.isfinite(dvals)]
+    dvals = dvals[dvals > 0.0]
+
+    cell_volume = float(cell_volume)
+    if cell_volume <= 0:
+        raise ValueError("cell_volume must be positive")
+    if dvals.size == 0:
+        raise ValueError("Density has no positive finite values")
+
+    return float(-np.sum(dvals * np.log2(dvals)) * cell_volume)
+
+def square_bounds(u_vals, v_vals, step=2.0, pad_frac=0.04):
+    u_vals = np.asarray(u_vals, float)
+    v_vals = np.asarray(v_vals, float)
+
+    u_min, u_max = float(np.min(u_vals)), float(np.max(u_vals))
+    v_min, v_max = float(np.min(v_vals)), float(np.max(v_vals))
+
+    low_needed = min(u_min, v_min)
+    high_needed = max(u_max, v_max)
+
+    span = high_needed - low_needed
+    pad = pad_frac * max(span, 1e-6)
+    low_needed -= pad
+    high_needed += pad
+
+    low = step * np.floor(low_needed / step)
+    high = step * np.ceil(high_needed / step)
+
+    half_len = 0.5 * (high - low)
+
+    # Same bounds for both u and v
+    return float(low), float(high), float(low), float(high), float(half_len)
+
+def training_base_cov(train_cases):
+    """
+    Estimate a location-specific base kernel covariance from past centered ensemble anomalies.
+    """
+    anomalies = []
+    for case in train_cases:
+        x = np.asarray(case["uv_members"], float)
+        mu = np.mean(x, axis=0)
+        anomalies.append(x - mu[None, :])
+
+    anomalies = np.vstack(anomalies)
+    return stabilize_cov(np.cov(anomalies.T, ddof=0))
+
+def mixture_logpdf_point(y, uv_members, kernel_cov):
+    """
+    Log density of equal-weight Gaussian mixture at point y.
+    """
+    y = np.asarray(y, float)
+    x = np.asarray(uv_members, float)
+    H = stabilize_cov(kernel_cov)
+
+    invH = np.linalg.inv(H)
+    detH = max(float(np.linalg.det(H)), 1e-18)
+    log_norm = -np.log(2.0 * np.pi) - 0.5 * np.log(detH)
+
+    diffs = y[None, :] - x
+    qf = np.einsum("mi,ij,mj->m", diffs, invH, diffs)
+    log_comp = log_norm - 0.5 * qf
+    return float(logsumexp(log_comp) - np.log(x.shape[0]))
+
+def choose_alpha_given_train(train_cases, alpha_grid):
+    """
+    Choose alpha on a training window by minimizing mean negative log score.
+    """
+    base_cov = training_base_cov(train_cases)
+
+    mean_nlls = []
+    for alpha in alpha_grid:
+        H = stabilize_cov((float(alpha) ** 2) * base_cov)
+        nlls = []
+        for case in train_cases:
+            lp = mixture_logpdf_point(case["uv_obs"], case["uv_members"], H)
+            nlls.append(-lp)
+        mean_nlls.append(np.mean(nlls))
+
+    mean_nlls = np.asarray(mean_nlls, float)
+    best_idx = int(np.argmin(mean_nlls))
+    best_alpha = float(alpha_grid[best_idx])
+    best_H = stabilize_cov((best_alpha ** 2) * base_cov)
+    return best_alpha, best_H, base_cov, mean_nlls
+
+def outer_validate_window(loc_cases, window, alpha_grid, train_min_cases):
+    """
+    Outer rolling-origin validation for one candidate train-window length.
+    Returns mean one-step-ahead NLL and number of evaluated cases.
+    """
+    outer_nlls = []
+
+    for idx in range(len(loc_cases)):
+        train_start = max(0, idx - window)
+        train_cases = loc_cases[train_start:idx]
+        if len(train_cases) < train_min_cases:
+            continue
+
+        best_alpha, kernel_cov, base_cov, mean_nlls = choose_alpha_given_train(train_cases, alpha_grid)
+        current = loc_cases[idx]
+        lp = mixture_logpdf_point(current["uv_obs"], current["uv_members"], kernel_cov)
+        outer_nlls.append(-lp)
+
+    if len(outer_nlls) == 0:
+        return np.inf, 0
+
+    return float(np.mean(outer_nlls)), int(len(outer_nlls))
+
+def mixture_predictive_cov(uv_members, kernel_cov):
+    member_cov = stabilize_cov(np.cov(np.asarray(uv_members, float).T, ddof=0))
+    return stabilize_cov(member_cov + kernel_cov)
+
+def gaussian_mixture_density_fixed_box(uv_members, kernel_cov, u_edges, v_edges):
+    uv_members = np.asarray(uv_members, float)
+    kernel_cov = stabilize_cov(kernel_cov)
+
+    u_centers = 0.5 * (u_edges[:-1] + u_edges[1:])
+    v_centers = 0.5 * (v_edges[:-1] + v_edges[1:])
+    U, V = np.meshgrid(u_centers, v_centers, indexing="xy")
+    pts = np.column_stack([U.ravel(), V.ravel()])
+
+    invH = np.linalg.inv(kernel_cov)
+    detH = max(float(np.linalg.det(kernel_cov)), 1e-18)
+    norm_const = 1.0 / (2.0 * np.pi * np.sqrt(detH))
+
+    diffs = pts[:, None, :] - uv_members[None, :, :]
+    qf = np.einsum("pmi,ij,pmj->pm", diffs, invH, diffs)
+    comp_pdf = norm_const * np.exp(-0.5 * qf)
+    mix_pdf = np.mean(comp_pdf, axis=1)
+
+    du = float(np.diff(u_edges)[0])
+    dv = float(np.diff(v_edges)[0])
+    cell_area = du * dv
+
+    total_mass = mix_pdf.sum() * cell_area
+    if not np.isfinite(total_mass) or total_mass <= 0:
+        raise ValueError("Mixture grid density has nonpositive total mass on the fixed box.")
+
+    mix_pdf /= total_mass
+    Z = mix_pdf.reshape(U.shape)
+    return mix_pdf, Z, U, V, cell_area
+
+def energy_score_mixture_mc(uv_members, kernel_cov, y, n_samples=3000, rng=None):
+    uv_members = np.asarray(uv_members, float)
+    kernel_cov = stabilize_cov(kernel_cov)
+    y = np.asarray(y, float)
+
+    if rng is None:
+        rng = np.random.default_rng(0)
+
+    m = uv_members.shape[0]
+    idx = rng.integers(0, m, size=n_samples)
+    noise = rng.multivariate_normal(np.zeros(2), kernel_cov, size=n_samples)
+    x = uv_members[idx] + noise
+
+    term1 = np.mean(np.linalg.norm(x - y[None, :], axis=1))
+    term2 = 0.5 * np.mean(np.linalg.norm(x[:-1] - x[1:], axis=1))
+    return float(term1 - term2)
+
+# ============================================================
+# Open WeatherBench2
+# ============================================================
+
+fs = gcsfs.GCSFileSystem(token="anon")
+ds_fc = xr.open_zarr(fs.get_mapper(FC_PATH), consolidated=None)
+ds_obs = xr.open_zarr(fs.get_mapper(OBS_PATH), consolidated=None)
+
+print("Opened WeatherBench2 forecast and observation datasets.")
+
+# ============================================================
+# Load 10m wind components
+# ============================================================
+
+fc_u, obs_u = select_forecasts_and_obs(
+    forecast_ds=ds_fc,
+    obs_ds=ds_obs,
+    variable="10m_u_component_of_wind",
+    start_date=WIND_START,
+    end_date=WIND_END,
+    lead_hours=WIND_LEAD_HOURS,
+    max_init_times=WIND_MAX_INIT_TIMES,
+)
+
+fc_v, obs_v = select_forecasts_and_obs(
+    forecast_ds=ds_fc,
+    obs_ds=ds_obs,
+    variable="10m_v_component_of_wind",
+    start_date=WIND_START,
+    end_date=WIND_END,
+    lead_hours=WIND_LEAD_HOURS,
+    max_init_times=WIND_MAX_INIT_TIMES,
+)
+
+times = pd.to_datetime(fc_u["time"].values)
+last_init_used = pd.to_datetime(fc_u["time"].values[-1]).strftime("%Y-%m-%d")
+print(f"Lead time used: {WIND_LEAD_HOURS}h")
+
+# ============================================================
+# First pass: collect all cases and pooled u,v values
+# ============================================================
+
+cases_by_location = {name: [] for name, _, _ in WIND_LOCATIONS}
+all_u_vals = []
+all_v_vals = []
+
+for location, lat, lon in WIND_LOCATIONS:
+    i, j, lat_used, lon_used = nearest_gridpoint_indices(fc_u, lat, lon)
+
+    ens_u = fc_u.isel(latitude=i, longitude=j).values
+    ens_v = fc_v.isel(latitude=i, longitude=j).values
+    obs_u_site = obs_u.isel(latitude=i, longitude=j).values
+    obs_v_site = obs_v.isel(latitude=i, longitude=j).values
+
+    for t in range(fc_u.sizes["time"]):
+        u_members = np.asarray(ens_u[t], float)
+        v_members = np.asarray(ens_v[t], float)
+        u_obs_t = float(obs_u_site[t])
+        v_obs_t = float(obs_v_site[t])
+
+        if not (
+            np.all(np.isfinite(u_members)) and
+            np.all(np.isfinite(v_members)) and
+            np.isfinite(u_obs_t) and
+            np.isfinite(v_obs_t)
+        ):
+            continue
+
+        uv_members = np.column_stack([u_members, v_members])
+        uv_obs = np.array([u_obs_t, v_obs_t], dtype=float)
+
+        all_u_vals.append(uv_members[:, 0])
+        all_v_vals.append(uv_members[:, 1])
+        all_u_vals.append(np.array([u_obs_t]))
+        all_v_vals.append(np.array([v_obs_t]))
+
+        cases_by_location[location].append({
+            "location": location,
+            "grid_lat": lat_used,
+            "grid_lon": lon_used,
+            "time_index": t,
+            "init_time": times[t],
+            "valid_time": times[t] + pd.Timedelta(hours=WIND_LEAD_HOURS),
+            "uv_members": uv_members,
+            "uv_obs": uv_obs,
+        })
+
+for location in cases_by_location:
+    cases_by_location[location] = sorted(cases_by_location[location], key=lambda d: d["init_time"])
+
+all_u_vals = np.concatenate(all_u_vals)
+all_v_vals = np.concatenate(all_v_vals)
+
+u_low, u_high, v_low, v_high, half_len = square_bounds(
+    all_u_vals, all_v_vals, step=EVEN_STEP, pad_frac=BOX_PAD_FRAC
+)
+
+u_edges_common = np.linspace(u_low, u_high, WIND_N_BINS_UV + 1)
+v_edges_common = np.linspace(v_low, v_high, WIND_N_BINS_UV + 1)
+uv_cell_area = float(np.diff(u_edges_common)[0]) * float(np.diff(v_edges_common)[0])
+
+outside_pooled = np.sum(
+    (all_u_vals < u_low) | (all_u_vals > u_high) |
+    (all_v_vals < v_low) | (all_v_vals > v_high)
+)
+
+print("\nFixed pooled square (u,v) box:")
+print(f"  u bounds: [{u_low:.1f}, {u_high:.1f}]")
+print(f"  v bounds: [{v_low:.1f}, {v_high:.1f}]")
+print(f"  side length: {2 * half_len:.1f}")
+print(f"  bin count: {WIND_N_BINS_UV} x {WIND_N_BINS_UV}")
+print(f"  cell area: {uv_cell_area:.4f}")
+print(f"  pooled points outside box: {outside_pooled}")
+
+# ============================================================
+# Outer rolling-origin validation to choose train-window length
+# ============================================================
+
+selection_rows = []
+
+for location, loc_cases in cases_by_location.items():
+    print(f"\nOuter validating training-window length for {location} ...")
+    for window in TRAIN_WINDOW_CANDIDATES:
+        mean_outer_nll, n_eval = outer_validate_window(
+            loc_cases=loc_cases,
+            window=window,
+            alpha_grid=ALPHA_GRID,
+            train_min_cases=TRAIN_MIN_CASES,
+        )
+        selection_rows.append({
+            "location": location,
+            "train_window": int(window),
+            "mean_outer_nll": float(mean_outer_nll),
+            "n_eval": int(n_eval),
+        })
+
+selection_df = pd.DataFrame(selection_rows).sort_values(["location", "mean_outer_nll", "train_window"]).reset_index(drop=True)
+
+best_windows = (
+    selection_df.sort_values(["location", "mean_outer_nll", "train_window"])
+    .groupby("location", as_index=False)
+    .first()
+    .rename(columns={"train_window": "selected_train_window", "mean_outer_nll": "selected_outer_nll"})
+)
+
+print("\nSelected train-window length by location:")
+display(best_windows.style.format({"selected_outer_nll": "{:.3f}"}))
+
+# ============================================================
+# Final rolling evaluation using selected train-window per location
+# ============================================================
+
+rows = []
+case_lookup = {}
+rng = np.random.default_rng(RNG_SEED)
+case_id = 0
+
+selected_window_map = dict(zip(best_windows["location"], best_windows["selected_train_window"]))
+selected_outer_nll_map = dict(zip(best_windows["location"], best_windows["selected_outer_nll"]))
+
+for location, loc_cases in cases_by_location.items():
+    selected_window = int(selected_window_map[location])
+    print(f"Final evaluation for {location}: selected train window = {selected_window}")
+
+    for idx, case in enumerate(loc_cases):
+        train_start = max(0, idx - selected_window)
+        train_cases = loc_cases[train_start:idx]
+
+        if len(train_cases) < TRAIN_MIN_CASES:
+            continue
+
+        best_alpha, kernel_cov, base_cov, alpha_scores = choose_alpha_given_train(
+            train_cases, ALPHA_GRID
+        )
+
+        uv_members = case["uv_members"]
+        uv_obs = case["uv_obs"]
+
+        dvals, Z, U, V, cell_area = gaussian_mixture_density_fixed_box(
+            uv_members, kernel_cov, u_edges_common, v_edges_common
+        )
+
+        predictive_cov = mixture_predictive_cov(uv_members, kernel_cov)
+
+        sharpness_val = sharpness_multi(dvals)
+        entropy_val = diff_entropy(dvals, cell_area)
+        det_sharp = determinant_sharpness(predictive_cov)
+        energy = energy_score_mixture_mc(
+            uv_members=uv_members,
+            kernel_cov=kernel_cov,
+            y=uv_obs,
+            n_samples=ENERGY_MC_SAMPLES,
+            rng=rng,
+        )
+
+        rows.append({
+            "case_id": case_id,
+            "location": case["location"],
+            "grid_lat": case["grid_lat"],
+            "grid_lon": case["grid_lon"],
+            "init_time": case["init_time"],
+            "valid_time": case["valid_time"],
+            "sharpness_uv": sharpness_val,
+            "entropy_bits": entropy_val,
+            "determinant_sharpness": det_sharp,
+            "energy_score": energy,
+            "bandwidth_alpha": best_alpha,
+            "selected_train_window": selected_window,
+            "selected_outer_nll": selected_outer_nll_map[location],
+        })
+
+        case_lookup[case_id] = {
+            **case,
+            "kernel_cov": kernel_cov,
+            "base_cov": base_cov,
+            "alpha_scores": alpha_scores,
+            "Z": Z,
+            "U": U,
+            "V": V,
+            "u_edges": u_edges_common,
+            "v_edges": v_edges_common,
+        }
+
+        case_id += 1
+
+wind_cases = pd.DataFrame(rows).sort_values(["location", "init_time"]).reset_index(drop=True)
+
+# ============================================================
+# Diagnostics
+# ============================================================
+
+print("\nCases retained after rolling-training requirement:")
+print(f"  {len(wind_cases)} total evaluated cases")
+
+print("\nSharpness distribution:")
+print(wind_cases["sharpness_uv"].describe(percentiles=[0.01, 0.1, 0.5, 0.9, 0.99]).round(4))
+
+print("\nBandwidth alpha distribution:")
+print(wind_cases["bandwidth_alpha"].describe(percentiles=[0.1, 0.5, 0.9]).round(3))
+
+# ============================================================
+# Crossplots
+# ============================================================
+
+fig, axes = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
+
+for loc, block in wind_cases.groupby("location"):
+    axes[0].scatter(block["determinant_sharpness"], block["sharpness_uv"], alpha=0.8, s=28, label=loc)
+    axes[1].scatter(block["entropy_bits"], block["sharpness_uv"], alpha=0.8, s=28, label=loc)
+    axes[2].scatter(block["entropy_bits"], block["determinant_sharpness"], alpha=0.8, s=28, label=loc)
+
+axes[0].set_xlabel("Determinant sharpness")
+axes[0].set_ylabel("Sharpness")
+axes[0].set_title("Sharpness vs determinant sharpness")
+axes[0].grid(True, alpha=0.3)
+
+axes[1].set_xlabel("Entropy (bits)")
+axes[1].set_ylabel("Sharpness")
+axes[1].set_title("Sharpness vs entropy")
+axes[1].grid(True, alpha=0.3)
+
+axes[2].set_xlabel("Entropy (bits)")
+axes[2].set_ylabel("Determinant sharpness")
+axes[2].set_title("Determinant sharpness vs entropy")
+axes[2].grid(True, alpha=0.3)
+
+axes[0].legend(loc="best", fontsize=8)
+
+fig.suptitle(
+    f"Example 2 — {WIND_LEAD_HOURS} h wind, {WIND_START} to {last_init_used}, "
+    f"{len(wind_cases)} cases",
+    y=1.06,
+)
+fig.savefig("wind_crossplots.pdf", bbox_inches="tight")
+plt.show()
+
+# ============================================================
+# Summary tables
+# ============================================================
+
+print("\nOuter validation results by location/window:")
+display(selection_df.style.format({"mean_outer_nll": "{:.3f}"}))
+
+print("\nLocation-level summary:")
+summary = (
+    wind_cases.groupby("location")
+    .agg(
+        n_cases=("case_id", "size"),
+        selected_train_window=("selected_train_window", "first"),
+        selected_outer_nll=("selected_outer_nll", "first"),
+        mean_sharpness=("sharpness_uv", "mean"),
+        mean_entropy=("entropy_bits", "mean"),
+        mean_determinant_sharpness=("determinant_sharpness", "mean"),
+        mean_energy_score=("energy_score", "mean"),
+        mean_bandwidth_alpha=("bandwidth_alpha", "mean"),
+    )
+    .sort_index()
+)
+
+display(
+    summary.style.format({
+        "selected_outer_nll": "{:.3f}",
+        "mean_sharpness": "{:.4f}",
+        "mean_entropy": "{:.3f}",
+        "mean_determinant_sharpness": "{:.3f}",
+        "mean_energy_score": "{:.3f}",
+        "mean_bandwidth_alpha": "{:.3f}",
+    })
+)
+
+
+
+
+# PDF download
+from google.colab import files
+files.download("wind_crossplots.pdf")
+
+
+
+
+
+"""CELL 3 - FIGURE 7"""
+# 2x2 figure:
+# lowest- and highest-sharpness density plots among forecasts with
+# determinant sharpness approximately TARGET_DS (within ±DS_TOL)
+#
+# for Figure 7 in the paper, set previous cell WIND_LEAD_HOUR = 120
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+TARGET_DS = 6.6
+DS_TOL = 0.2
+FALLBACK_N = 10
+
+cand = wind_cases[np.abs(wind_cases["determinant_sharpness"] - TARGET_DS) <= DS_TOL].copy()
+
+if len(cand) < 2:
+    cand = (
+        wind_cases.assign(ds_diff=np.abs(wind_cases["determinant_sharpness"] - TARGET_DS))
+        .sort_values("ds_diff")
+        .head(FALLBACK_N)
+        .copy()
+    )
+
+low_row = cand.loc[cand["sharpness_uv"].idxmin()]
+high_row = cand.loc[cand["sharpness_uv"].idxmax()]
+
+def plot_case_on_ax(case_id, ax, contour_levels=12):
+    info = case_lookup[int(case_id)]
+    row = wind_cases.loc[wind_cases["case_id"] == int(case_id)].iloc[0]
+
+    uv_members = info["uv_members"]
+    uv_obs = info["uv_obs"]
+    Z = info["Z"]
+    U = info["U"]
+    V = info["V"]
+    u_edges = info["u_edges"]
+    v_edges = info["v_edges"]
+
+    cf = ax.contourf(U, V, Z, levels=contour_levels, cmap="viridis")
+#    ax.contour(U, V, Z, levels=contour_levels, colors="k", linewidths=0.5, alpha=0.45)
+
+    ax.scatter(
+        uv_members[:, 0], uv_members[:, 1],
+        s=28, marker="o", edgecolor="white", linewidth=0.5, label="Ensemble members"
+    )
+    ax.scatter(
+        np.mean(uv_members[:, 0]), np.mean(uv_members[:, 1]),
+        s=90, marker="x", linewidth=2.0, label="Ensemble mean"
+    )
+    ax.scatter(
+        uv_obs[0], uv_obs[1],
+        s=100, marker="*", edgecolor="black", linewidth=0.8, label="Observation"
+    )
+
+    ax.set_xlim(u_edges[0], u_edges[-1])
+    ax.set_ylim(v_edges[0], v_edges[-1])
+    ax.set_xlabel("10m_u_component_of_wind")
+    ax.set_ylabel("10m_v_component_of_wind")
+    ax.set_title(
+        f"{row['location']}\n"
+        f"init={row['init_time']}   valid={row['valid_time']}\n"
+        f"S={row['sharpness_uv']:.4f}   "
+        f"DS={row['determinant_sharpness']:.3f}\n"
+    )
+    ax.grid(True, alpha=0.25)
+    return cf
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
+
+# Left: lowest sharpness
+cf1 = plot_case_on_ax(int(low_row["case_id"]), axes[0], contour_levels=12)
+axes[0].set_title(axes[0].get_title() + "\n(lowest sharpness)")
+
+# Right: highest sharpness
+cf2 = plot_case_on_ax(int(high_row["case_id"]), axes[1], contour_levels=12)
+axes[1].set_title(axes[1].get_title() + "\n(highest sharpness)")
+
+handles, labels = axes[1].get_legend_handles_labels()
+if handles:
+    axes[1].legend(handles, labels, loc="best", fontsize=8)
+
+fig.colorbar(cf2, ax=axes, shrink=0.9, label="Mixture density")
+fig.savefig("wind_2.pdf", bbox_inches="tight")
+plt.show()
+
+
+# show what was picked
+fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+
+axes[0].scatter(
+    wind_cases["determinant_sharpness"],
+    wind_cases["sharpness_uv"],
+    alpha=0.35,
+    s=24
+)
+axes[0].scatter(
+    [low_row["determinant_sharpness"], high_row["determinant_sharpness"]],
+    [low_row["sharpness_uv"], high_row["sharpness_uv"]],
+    s=90,
+    marker="o",
+    edgecolor="black",
+    linewidth=0.8
+)
+axes[0].set_xlabel("Determinant sharpness")
+axes[0].set_ylabel("Sharpness")
+axes[0].set_title("Sharpness vs determinant sharpness")
+axes[0].grid(True, alpha=0.3)
+
+axes[1].scatter(
+    wind_cases["energy_score"],
+    wind_cases["sharpness_uv"],
+    alpha=0.35,
+    s=24
+)
+axes[1].scatter(
+    [low_row["energy_score"], high_row["energy_score"]],
+    [low_row["sharpness_uv"], high_row["sharpness_uv"]],
+    s=90,
+    marker="o",
+    edgecolor="black",
+    linewidth=0.8
+)
+axes[1].set_xlabel("Energy score")
+axes[1].set_ylabel("Sharpness")
+axes[1].set_title("Sharpness vs energy score")
+axes[1].grid(True, alpha=0.3)
+
+plt.show()
+
+
+
+
+
+# PDF download
+from google.colab import files
+files.download("wind_2.pdf")
