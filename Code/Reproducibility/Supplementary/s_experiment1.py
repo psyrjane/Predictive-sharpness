@@ -71,7 +71,7 @@ if __name__ == "__main__":
     sharpness_vals = np.array([sp(p) for p in distributions])
 
     # --- Sharpness level set analysis ---
-    for target_s in [0.4, 0.6]:
+    for target_s in [0.3, 0.6]:
         analyze_level_set(distributions, entropies, sharpness_vals,
                           target_val=target_s, tol=0.01, mode="sharpness", top_k=10)
 
