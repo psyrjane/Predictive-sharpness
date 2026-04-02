@@ -24,10 +24,9 @@ def compute_entropy(pdf_vals):
     safe_pdf = np.where(pdf_vals > 0, pdf_vals, 1.0)
     return -np.sum(pdf_vals * np.log(safe_pdf)) * w
 
-def compute_kl_divergence(pdf_vals):
-    u = 1 / L
-    safe_pdf = np.where(pdf_vals > 0, pdf_vals, 1.0)
-    return np.sum(pdf_vals * np.log(safe_pdf / u)) * w
+def compute_variance(pdf_vals):
+    mean = np.sum(x * pdf_vals) * w
+    return np.sum(((x - mean) ** 2) * pdf_vals) * w
 
 # Define distributions over [0, 4]
 distributions = []
@@ -62,12 +61,12 @@ pdf_gauss2 = norm.pdf(x, loc=2.8, scale=0.5)
 pdf_gauss2 = normalize_pdf(pdf_gauss2)
 distributions.append(("Gaussian μ=2.8, σ=0.5", pdf_gauss2))
 
-# Piecewise: 0 on [0,2); 0.15 on [2,3); 0.85 on [3,4]
+# Piecewise: 0.15 on [0,1); 0 on [1,3); 0.85 on [3,4]
 pdf_piece2 = np.zeros_like(x)
-pdf_piece2[(x >= 2) & (x < 3)] = 0.15
-pdf_piece2[(x >= 3)] = 0.85
+pdf_piece2[(x >= 0) & (x < 1)] = 0.15
+pdf_piece2[x >= 3] = 0.85
 pdf_piece2 = normalize_pdf(pdf_piece2)
-distributions.append(("Piecewise: 0 on [0,2); 0.15 on [2,3); 0.85 on [3,4]", pdf_piece2))
+distributions.append(("Piecewise: 0.15 on [0,1); 0 on [1,3); 0.85 on [3,4]", pdf_piece2))
 
 # Gaussian mu=2.8, sigma=0.1
 pdf_gauss3 = norm.pdf(x, loc=2.8, scale=0.1)
@@ -97,19 +96,19 @@ rows = []
 for label, pdf in distributions:
     sharpness = compute_sharpness(pdf)
     entropy = compute_entropy(pdf)
-    kl = compute_kl_divergence(pdf)
+    variance = compute_variance(pdf)
     rows.append({
         "Distribution": label,
         "S(d*)": round(sharpness, 4),
         "Entropy (nats)": round(entropy, 4),
-        "KL Divergence (nats)": round(kl, 4)
+        "Variance": round(variance, 4)
     })
 
 rows.append({
     "Distribution": "Dirac delta (symbolic)",
-    "S(d*)": float(S_limit),
+    "S(f)": float(S_limit),
     "Entropy (nats)": "−",
-    "KL Divergence (nats)": "-"
+    "Variance": 0.0
 })
 
 # Output results
