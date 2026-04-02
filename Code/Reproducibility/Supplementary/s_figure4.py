@@ -1,3 +1,7 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+
 # Step 1: Define grid on the 2-simplex with fine delta
 delta = 0.01
 points_n3 = []
@@ -86,7 +90,7 @@ def plot_level_sets(projections, levels, title, label_prefix):
     ax.text(-0.05, -0.05, "p1", fontsize=12)
     ax.text(1.05, -0.05, "p2", fontsize=12)
     ax.text(0.48, np.sqrt(3)/2 + 0.05, "p3", fontsize=12)
-    ax.set_title(title, fontsize=12, pad=30, fontweight='bold')
+    ax.set_title(title, fontsize=15, pad=30, fontweight='bold')
     ax.legend()
     plt.tight_layout()
     plt.show()
