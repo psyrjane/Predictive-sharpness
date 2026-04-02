@@ -13,7 +13,7 @@ sharpness_core.py - Contains the discrete sharpness function S(P), S_rel, domain
 
 sharpness_monte_carlo.py - Experimental function for evaluating sharpness for high-dimensional pdfs by Monte Carlo sampling.
 
-sharpness_raw.py - Example function of calculating sharpness from raw data point by histogram evaluation.
+sharpness_raw.py - Example function of calculating sharpness from raw data points by histogram evaluation.
 
 rearranged_formulas.py - Implements the rearranged analyses for the mass-length plot with visualization.
 
