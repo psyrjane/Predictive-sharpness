@@ -11,14 +11,13 @@ def barycentric_to_cartesian(p):
 
 # Generate grid points on 2-simplex
 step = 0.01
-vals = np.arange(0, 1 + step, step)
-points_n3 = []
-for i in vals:
-    for j in vals:
-        k = 1 - i - j
-        if 0 <= k <= 1:
-            points_n3.append([i, j, k])
-points_n3 = np.array(points_n3)
+N = int(round(1 / step))
+
+points_n3 = np.array([
+    [i / N, j / N, (N - i - j) / N]
+    for i in range(N + 1)
+    for j in range(N + 1 - i)
+])
 
 tolerance = 0.01
 
