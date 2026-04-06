@@ -178,7 +178,7 @@ def analyze_pdf(pdf, bounds=None, bins=None, normalize=False):
         """Visualizes the mass-length components of the sharpness measure."""
         plt.figure(figsize=(10, 6))
         plt.plot(t, m, label="m(t)", color="#ffaf00", linewidth=2)
-        plt.plot(t, dL, label=r"$d_*(t) \cdot L(t)$", color="#f46920", linewidth=2)
+        plt.plot(t, dL, label=r"$f^{\uparrow}\!\!(t)\cdot L(t)$", color="#f46920", linewidth=2)
         plt.xlabel("t (Rearranged Domain)")
         plt.ylabel("Integrand Value")
         plt.title(f"ML Sharpness Components for PDF (S = {score:.3f})")
@@ -775,5 +775,4 @@ if __name__ == "__main__":
 #analysis["point"]([1, 1], ml_visualize=True)
 #analysis["m_above"]([1, 1], ml_visualize=True)
 ## Plot all together:
-
 #analysis["plot_overlays"]()
