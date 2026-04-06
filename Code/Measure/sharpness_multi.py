@@ -3,8 +3,7 @@ Predictive Sharpness for Multidimensional Cases — Midpoint Discretization + Vi
 --------------------------------------------------------------------------
 
 This script implements the continuous sharpness measure S(f) from the paper:
-"A Measure of Predictive Sharpness for Probabilistic Models" with support for multidimensional use, 
-midpoint discretization, direct array inputs, and visualizations, using the three equivalent sharpness formulas:
+"A Measure of Predictive Sharpness for Probabilistic Models" with support for multidimensional use, midpoint discretization, direct array inputs, and visualizations, using the three equivalent sharpness formulas:
 
     1) Simplified
     2) Mass–Length (ML)
@@ -488,7 +487,7 @@ def visualize_sharpness(pdfs, titles=None, mode="gini", show_fractional=True, ma
             score, t, t_times_d = sharpness_multi(pdf, mode="simplified", plot_data=True)
             plt.plot(t, t_times_d, label=f"{title}, $S = {score:.3f}$")
         plt.xlabel("t")
-        plt.ylabel(r"$t \cdot d_*(t)$")
+        plt.ylabel(r"$t \cdot f^{\uparrow}\!\!(t)$")
         plt.title("Integrands for pdfs")
         plt.legend()
         plt.grid(True)
@@ -499,10 +498,9 @@ def visualize_sharpness(pdfs, titles=None, mode="gini", show_fractional=True, ma
         plt.figure(figsize=(7, 4 * len(pdfs)))
         for i, (pdf, title) in enumerate(zip(pdfs, titles), 1):
             score, t_vals, m, dL = sharpness_multi(pdf, mode="ml", plot_data=True)
-            # Plot m(t) and d*(t)L(t) in their own subplot
             plt.subplot(len(pdfs), 1, i)
             plt.plot(t_vals, m, label="m(t)", color="#ffaf00", linewidth=2)
-            plt.plot(t_vals, dL, label=r"$d_*(t)\cdot L(t)$", color="#f46920", linewidth=2)
+            plt.plot(t_vals, dL, label=r"$f^{\uparrow}\!\!(t)\cdot L(t)$", color="#f46920", linewidth=2)
             plt.title(f"{title} (S = {score:.3f})", fontsize=12)
             plt.xlabel("t")
             plt.ylabel("Integrand Value")
