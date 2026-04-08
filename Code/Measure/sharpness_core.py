@@ -11,8 +11,8 @@ sharpness_multi.py.
 WHAT THIS GIVES YOU
 -------------------
 1) Discrete sharpness:
-   - sp(p):     Simplified discrete sharpness S(P)
-   - sp_ml(p):  Mass–length version of discrete sharpness (analytically equivalent to sp)
+   - s_discrete(p):     Simplified discrete sharpness S(P)
+   - s_discrete_ml(p):  Mass–length version of discrete sharpness (analytically equivalent to s_discrete)
 
 2) Continuous sharpness on a bounded interval [a, b]:
    - sd(pdf, a, b, bins):        Simplified continuous sharpness S(f)
@@ -21,8 +21,8 @@ WHAT THIS GIVES YOU
 
 3) Relative sharpness, domain transformations:
    - s_rel(S1, S2):              Relative sharpness change (ΔS_REL)
-   - sp_f(Sm, m, n, strict=True) / sp_i(Sn, n, m, strict=True):    Discrete-domain scaling (forward/inverse)
-   - sd_f(S_ell, ell, L, strict=True) / sd_i(S_L, L, ell, strict=True):    Continuous-domain scaling (forward/inverse)
+   - discrete_f(Sm, m, n, strict=True) / discrete_i(Sn, n, m, strict=True):    Discrete-domain scaling (forward/inverse)
+   - continuous_f(S_ell, ell, L, strict=True) / continuous_i(S_L, L, ell, strict=True):    Continuous-domain scaling (forward/inverse)
 
 INTERPRETATION
 --------------
@@ -32,7 +32,7 @@ All sharpness scores are normalized to [0, 1]:
 
 ASSUMPTIONS / REQUIREMENTS
 --------------------------
-- For discrete functions (sp, sp_ml), 'p' is a valid pmf: p_i ≥ 0 and sum(p) = 1.
+- For discrete functions (s_discrete, s_discrete_ml), 'p' is a valid pmf: p_i ≥ 0 and sum(p) = 1.
 - For continuous functions (sd, sd_ml, sd_gini):
     * 'pdf(x)' returns density values on [a, b].
     * The density integrates to ~1 over [a, b]. (Small numerical errors are fine.)
@@ -47,7 +47,7 @@ PRACTICAL TIPS
 
 import numpy as np
 
-def sp(p):
+def s_discrete(p):
     """
     Discrete sharpness S(P): simplified (fast) form — works for 1D or multidimensional PMFs.
 
@@ -84,7 +84,7 @@ def sp(p):
     return np.dot(w, p_sorted)
 
 
-def sp_ml(p):
+def s_discrete_ml(p):
     """
     Discrete sharpness S(P): mass–length (expanded) form — works for 1D or multidimensional PMFs.
 
@@ -110,7 +110,7 @@ def sp_ml(p):
              evaluated at each grid point).
 
     Returns:
-        float in [0, 1], equivalent to sp(p).
+        float in [0, 1], equivalent to s_discrete(p).
     """
     if isinstance(p, dict):
         p = list(p.values())
@@ -266,7 +266,7 @@ def s_rel(S1, S2, strict=True):
 
     return (S2 - S1) / (1 - S1)
 
-def sp_f(Sm, m, n, strict=True):
+def discrete_f(Sm, m, n, strict=True):
 
     """
     Transform sharpness score from discrete domain of size m to larger domain of size n.
@@ -293,7 +293,7 @@ def sp_f(Sm, m, n, strict=True):
     return 1 + ((m - 1) / (n - 1)) * (Sm - 1)
 
 
-def sp_i(Sn, n, m, strict=True):
+def discrete_i(Sn, n, m, strict=True):
 
     """
     Transform sharpness score from discrete domain of size n to smaller domain of size m on the assumption that the n - m additional outcomes are assigned zero probability.
@@ -320,7 +320,7 @@ def sp_i(Sn, n, m, strict=True):
     return 1 + ((n - 1) / (m - 1)) * (Sn - 1)
 
 
-def sd_f(S_ell, ell, L, strict=True):
+def continuous_f(S_ell, ell, L, strict=True):
 
     """
     Transform sharpness score from a restricted continuous domain of measure ell to extended domain of measure L.
@@ -347,7 +347,7 @@ def sd_f(S_ell, ell, L, strict=True):
     return 1 + (ell / L) * (S_ell - 1)
 
 
-def sd_i(S_L, L, ell, strict=True):
+def continuous_i(S_L, L, ell, strict=True):
 
     """
     Transform sharpness score from an extended continuous domain of measure L to restricted domain of measure ell, on the assumption that the original probability density function d(y) assigned zero probability to the extended region from ell to L.
@@ -409,15 +409,15 @@ pdfs = [
 #     df = pd.read_csv(r"you path\your_file.csv", header=None, sep=";")
 #     distributions_csv = df.values.tolist()
 #
-# To enable sp(p) to read files with distributions defined over varying n, add the following line to the definition of sp(p), p = p[~np.isnan(p)], below p = np.asarray(p, float)
+# To enable s_discrete(p) to read files with distributions defined over varying n, add the following line to the definition of s_discrete(p), p = p[~np.isnan(p)], below p = np.asarray(p, float)
 
 # === OUTPUT ===
 
 sharpness_scores = []
 
 for i, p in enumerate(distributions, start=1):
-    s1 = sp(p)
-    s2 = sp_ml(p)
+    s1 = s_discrete(p)
+    s2 = s_discrete_ml(p)
     sharpness_scores.append(s1)
     print(f"Distribution {i}: {p}")
     print(f"  Sharpness (simplified):   {s1:.3f}")
@@ -434,18 +434,18 @@ for label, pdf in pdfs:
 
 print("\n=== Discrete Relative Gain & Domain Transformation Example ===")
 m, n = 4, 7
-S2 = sp(distributions[1])  # Dist 2
-S4 = sp(distributions[3])  # Dist 4
+S2 = s_discrete(distributions[1])  # Dist 2
+S4 = s_discrete(distributions[3])  # Dist 4
 rel_gain_discrete = s_rel(S2, S4)
 print(f"ΔS_REL (Dist 2 → Dist 4): {rel_gain_discrete:.4f}")
 
 S_val = S2
-S_forward = sp_f(S_val, m, n)
-S_inverse = sp_i(S_forward, n, m)
+S_forward = discrete_f(S_val, m, n)
+S_inverse = discrete_i(S_forward, n, m)
 print(f"\nDomain transformation for Dist 2: {distributions[1]}")
 print(f"  S(P) = {S_val:.4f}")
-print(f"  sp_f (m={m} → n={n}): {S_forward:.4f}")
-print(f"  sp_i (n={n} → m={m}): {S_inverse:.4f}")
+print(f"  discrete_f (m={m} → n={n}): {S_forward:.4f}")
+print(f"  discrete_i (n={n} → m={m}): {S_inverse:.4f}")
 
 print("\n=== Continuous Relative Gain & Domain Transformation Example ===")
 ell, L = 4.0, 7.0
@@ -455,17 +455,17 @@ rel_gain_cont = s_rel(S_gauss, S_mix)
 print(f"ΔS_REL (Gaussian → Mixture): {rel_gain_cont:.4f}")
 
 S_val = S_gauss
-S_forward = sd_f(S_val, ell, L)
-S_inverse = sd_i(S_forward, L, ell)
+S_forward = continuous_f(S_val, ell, L)
+S_inverse = continuous_i(S_forward, L, ell)
 print(f"\nDomain transformation for Gaussian μ=2.8, σ=1")
 print(f"  S(f) = {S_val:.4f}")
-print(f"  sd_f (ell={ell} → L={L}): {S_forward:.4f}")
-print(f"  sd_i (L={L} → ell={ell}): {S_inverse:.4f}")
+print(f"  continuous_f (ell={ell} → L={L}): {S_forward:.4f}")
+print(f"  continuous_i (L={L} → ell={ell}): {S_inverse:.4f}")
 
 # From csv
-# print("\n=== Sharpness Calculations (sp) ===")
+# print("\n=== Sharpness Calculations (s_discrete) ===")
 # for i, p in enumerate(distributions_csv, start=1):
 #     clean_p = [val for val in p if not (isinstance(val, float) and np.isnan(val))]
-#     sharp = sp(clean_p)
+#     sharp = s_discrete(clean_p)
 #     print(f"Distribution {i}: {clean_p}")
 #     print(f"  Sharpness (simplified): {sharp:.4f}")
