@@ -472,7 +472,6 @@ sharpness_multi <- function(dvals, mode = c("simplified", "ml", "gini"), plot_da
     t <- weights * v
     integral <- v * sum(d_sorted * t)
     score <- (2 / L) * integral - 1
-    score <- max(0, min(1, score))
 
     if (plot_data) {
       return(list(score = score, t = t, y = t * d_sorted))
@@ -486,7 +485,6 @@ sharpness_multi <- function(dvals, mode = c("simplified", "ml", "gini"), plot_da
     m <- rev(cumsum(rev(d_sorted))) * v
     dL <- d_sorted * (L - t)
     score <- sum(m[-N] - dL[-N]) / N
-    score <- max(0, min(1, score))
 
     if (plot_data) {
       return(list(score = score, t = t, m = m, dL = dL))
@@ -497,7 +495,6 @@ sharpness_multi <- function(dvals, mode = c("simplified", "ml", "gini"), plot_da
   cum_mass <- c(0, cumsum(d_sorted) * v)
   lorenz_area <- sum((cum_mass[-length(cum_mass)] + cum_mass[-1]) / 2) * (1 / N)
   score <- 1 - 2 * lorenz_area
-  score <- max(0, min(1, score))
 
   if (plot_data) {
     u <- seq(0, 1, length.out = N + 1)
@@ -656,7 +653,13 @@ visualize_sharpness <- function(
 
   op <- par(no.readonly = TRUE)
   on.exit(par(op), add = TRUE)
-  par(mfrow = c(nrows, ncols), mar = c(4, 3.5, 3, 1), oma = c(0, 0, 0, 0))
+  if (n == 1L) {
+    par(mfrow = c(nrows, ncols), mar = c(4.2, 4.8, 3, 6),
+        mgp = c(3.0, 0.8, 0), oma = c(0, 0, 0, 0))
+  } else {
+    par(mfrow = c(nrows, ncols), mar = c(4.2, 4.8, 3, 1),
+        mgp = c(3.0, 0.8, 0), oma = c(0, 0, 0, 0))
+  }
 
   for (k in seq_len(nrows * ncols)) {
     if (k > n) {
@@ -711,7 +714,10 @@ visualize_sharpness <- function(
         segments(-0.99 * w_ye, ye, 0.99 * w_ye, ye, col = "white", lwd = 1.3)
       }
 
-      axis(1, at = c(-0.5, 0.5), labels = c("0.5", "0.5"), cex.axis = 0.8)
+      usr <- par("usr")
+      segments(-1, usr[3], 1, usr[3], xpd = FALSE)
+      axis(1, at = c(-0.5, 0.5), labels = c("0.5", "0.5"),
+           cex.axis = 0.8, lwd = 0, lwd.ticks = 1)
       if (col_idx == 1L) axis(2, at = axis_ticks, labels = axis_labels, las = 1, cex.axis = 0.8)
 
     } else {
@@ -754,7 +760,10 @@ visualize_sharpness <- function(
         segments(-0.99 * w_fe, ye_plot, 0.99 * w_fe, ye_plot, col = "white", lwd = 1.3)
       }
 
-      axis(1, at = c(-0.5, 0.5), labels = c("0.5", "0.5"), cex.axis = 0.8)
+      usr <- par("usr")
+      segments(-1, usr[3], 1, usr[3], xpd = FALSE)
+      axis(1, at = c(-0.5, 0.5), labels = c("0.5", "0.5"),
+           cex.axis = 0.8, lwd = 0, lwd.ticks = 1)
       tick_pos <- seq(0, 1, length.out = 6)
       frac_tick_vals <- zoom_y + tick_pos * (1.0 - zoom_y)
       tick_labels <- if (show_fractional) {
@@ -766,8 +775,20 @@ visualize_sharpness <- function(
     }
 
     if (k == 1L) {
-      legend("topright", legend = legend_labels, fill = fill_cols, title = "Mass bins",
-             cex = 0.8, bty = "o")
+      legend(x = 1,
+             y = par("usr")[3] + 0.03 * diff(par("usr")[3:4]),
+             legend = legend_labels,
+             fill = fill_cols,
+             title = "Mass bins",
+             xjust = 0,
+             yjust = 0,
+             cex = 0.78,
+             bty = "o",
+             bg = NA,
+             box.col = "black",
+             x.intersp = 0.8,
+             y.intersp = 1.0,
+             xpd = NA)
     }
   }
 
