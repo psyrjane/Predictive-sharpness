@@ -1,7 +1,7 @@
 # Predictive-sharpness
 This repository contains the code for implementing the sharpness measure from the paper "A Measure of Predictive Sharpness for Probabilistic Models". It also contains the code for reproducing the figures, tables, simulations, and experiments in the paper.
 
-For implementation, see the folder "Measure". For reproducibility material, see the folder "Reproducibility".
+Most functionalities have been built using Python. For implementation, see the folder "Measure". For reproducibility material, see the folder "Reproducibility". R translations were recently added for basic functions.
 
 Article: https://doi.org/10.48550/arXiv.2509.03309
 
@@ -21,4 +21,4 @@ c_plot.py - Implements the equivalent analyses from rearranged_formulas.py on co
 
 c_plot_multiple.py - Implements sharpness score contributions by area for multiple pdfs.
 
-minmax_finder - Finds the min and max sharpness and entropy while the other measure is fixed. For discrete cases, also provides the minimizing or maximizing distribution.
+minmax_finder.py - Finds the min and max sharpness and entropy while the other measure is fixed. For discrete cases, also provides the minimizing or maximizing distribution.
